@@ -1,0 +1,3 @@
+[submodule "emerald-grpc"]
+	path = emerald-grpc
+	url = git@github.com:p2p-org/emerald-grpc.git
