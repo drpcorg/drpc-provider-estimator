@@ -62,4 +62,3 @@ methods:
   trace_callMany: 90
   eth_sendRawTransaction: 90
 default_price: 100
-archive_multiplier: 4

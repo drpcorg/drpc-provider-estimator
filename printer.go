@@ -10,7 +10,7 @@ type PrinterHolder struct {
 	Printers []Printer
 }
 
-func (p PrinterHolder) doPrint(f func(p Printer)) {
+func (p PrinterHolder) Iterate(f func(p Printer)) {
 	for _, printer := range p.Printers {
 		f(printer)
 	}

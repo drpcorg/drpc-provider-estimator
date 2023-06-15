@@ -18,6 +18,7 @@ import (
 	"github.com/p2p-org/drpc-provider-estimator/dshackle"
 	"github.com/p2p-org/drpc-provider-estimator/gas"
 	"time"
+	"sync/atomic"
 )
 
 type Options struct {
@@ -36,7 +37,7 @@ type Options struct {
 	Insecure         bool   `long:"insecure" short:"i" description:"certificate"`
 }
 
-var DEFAULT_PROFILE = map[string]int64{
+var DefaultProfile = map[string]int64{
 	"eth_getCode":               100,
 	"eth_getLogs":               250,
 	"eth_getTransactionByHash":  250,
@@ -85,17 +86,17 @@ func main() {
 		})
 	}
 
-	printers.doPrint(func(printer Printer) {
+	printers.Iterate(func(printer Printer) {
 		printer.PrintHeader()
 	})
 
-	var dataFuncProvider func(cuCount *uint64) func(mtd *desc.MethodDescriptor, callData *runner.CallData) []byte
+	var dataFuncProvider func(*uint64) func(*desc.MethodDescriptor, *runner.CallData) []byte
 
 	fmt.Println(options.Mode)
 	if options.Mode == "spam" {
 		var profile map[string]int64
 		if options.SpamProfile == "" {
-			profile = DEFAULT_PROFILE
+			profile = DefaultProfile
 		} else {
 			profile = map[string]int64{}
 			profileRaw, _ := os.ReadFile(options.SpamProfile)
@@ -106,7 +107,7 @@ func main() {
 		}
 		fmt.Println(profile)
 		dataFuncProvider = func(cuCount *uint64) func(mtd *desc.MethodDescriptor, callData *runner.CallData) []byte {
-			return NewEthSpamBinaryDataFunc(profile, options.SourceHost, dshackle.ChainRef(options.Chain), cuCount, context.Background())
+			return NewEthSpamBinaryDataFunc(context.Background(), profile, options.SourceHost, dshackle.ChainRef(options.Chain), cuCount)
 		}
 	} else if options.Mode == "prepared" {
 		files, err := os.ReadDir(options.PreparedRequests)
@@ -129,21 +130,24 @@ func main() {
 			if err != nil {
 				panic(err)
 			}
-			params, _ := json.Marshal(jsonrpc.Params)
+
 			req := &dshackle.NativeCallRequest{
 				Chain: dshackle.ChainRef(options.Chain),
 				Items: []*dshackle.NativeCallItem{
 					{
 						Id:      uint32(jsonrpc.Id),
 						Method:  jsonrpc.Method,
-						Payload: params,
+						Payload: jsonrpc.Params,
 					},
 				},
 			}
 
 			if options.RequestLabel != "" {
 				selector := dshackle.Selector{}
-				_ = protojson.Unmarshal([]byte(options.RequestLabel), &selector)
+				err = protojson.Unmarshal([]byte(options.RequestLabel), &selector)
+				if err != nil {
+					exit(1, "error during fetching selector: %v", err)
+				}
 				req.Selector = &selector
 			}
 
@@ -170,7 +174,7 @@ func main() {
 
 	for _, l := range load {
 
-		printers.doPrint(func(printer Printer) {
+		printers.Iterate(func(printer Printer) {
 			printer.PrintPreLine(l)
 		})
 
@@ -200,7 +204,7 @@ func main() {
 
 		succRate := calcErrorRate(report.StatusCodeDist)
 
-		printers.doPrint(func(printer Printer) {
+		printers.Iterate(func(printer Printer) {
 			printer.PrintLine(l, report.Rps, report.Average, succRate, curCu/options.StepDuration, report.ErrorDist)
 		})
 
@@ -209,7 +213,7 @@ func main() {
 		}
 
 		if prevRps > report.Rps {
-			printers.doPrint(func(printer Printer) {
+			printers.Iterate(func(printer Printer) {
 				printer.PrintEvent("RPS DECREASED")
 			})
 
@@ -219,7 +223,7 @@ func main() {
 		}
 
 		if prevMean*100 < report.Average {
-			printers.doPrint(func(printer Printer) {
+			printers.Iterate(func(printer Printer) {
 				printer.PrintEvent("LATENCY INCREASED")
 			})
 
@@ -229,7 +233,7 @@ func main() {
 		}
 
 		if succRate < 0.85 {
-			printers.doPrint(func(printer Printer) {
+			printers.Iterate(func(printer Printer) {
 				printer.PrintEvent("ERROR RATE INCREASED")
 			})
 
@@ -244,7 +248,7 @@ func main() {
 
 	maxCu = maxCu / options.StepDuration
 
-	printers.doPrint(func(printer Printer) {
+	printers.Iterate(func(printer Printer) {
 		printer.PrintFooter(maxCu)
 	})
 }
@@ -264,7 +268,7 @@ func calcErrorRate(dist map[string]int) float64 {
 	return 1 - (nok / total)
 }
 
-func NewEthSpamBinaryDataFunc(queryParams map[string]int64, parentHost string, chain dshackle.ChainRef, cuCount *uint64, ctx context.Context) func(mtd *desc.MethodDescriptor, callData *runner.CallData) []byte {
+func NewEthSpamBinaryDataFunc(ctx context.Context, queryParams map[string]int64, parentHost string, chain dshackle.ChainRef, cuCount *uint64) func(mtd *desc.MethodDescriptor, callData *runner.CallData) []byte {
 	generator, err := ethspam.MakeQueriesGenerator(queryParams)
 	if err != nil {
 		exit(1, "failed to install defaults: %s", err)
@@ -280,12 +284,14 @@ func NewEthSpamBinaryDataFunc(queryParams map[string]int64, parentHost string, c
 
 	stateChannel := make(chan ethspam.State, 1)
 
-	randSrc := rand.NewSource(time.Now().UnixNano())
+	
 	go func() {
+		randSrc := rand.NewSource(time.Now().UnixNano())
 		state := ethspam.LiveState{
 			IdGen:   &ethspam.IdGenerator{},
 			RandSrc: randSrc,
 		}
+		defer close(stateChannel)
 		for {
 			newState, err := mkState.Refresh(&state)
 			if err != nil {
@@ -313,6 +319,7 @@ func NewEthSpamBinaryDataFunc(queryParams map[string]int64, parentHost string, c
 			select {
 			case <-time.After(15 * time.Second):
 			case <-ctx.Done():
+				return
 			}
 		}
 	}()
@@ -322,6 +329,7 @@ func NewEthSpamBinaryDataFunc(queryParams map[string]int64, parentHost string, c
 	queries := make(chan ethspam.QueryContent, 1000)
 
 	go func() {
+		defer close(queries)
 		for {
 			// Update state when a new one is emitted
 			select {
@@ -335,7 +343,11 @@ func NewEthSpamBinaryDataFunc(queryParams map[string]int64, parentHost string, c
 			} else if err != nil {
 				exit(2, "failed to write generated query: %s", err)
 			} else {
-				queries <- q
+				select {
+				case queries <- q:
+				case <-ctx.Done():
+					break
+				}
 			}
 		}
 	}()
@@ -359,7 +371,7 @@ func NewEthSpamBinaryDataFunc(queryParams map[string]int64, parentHost string, c
 		if err != nil {
 			panic(err)
 		}
-		*cuCount += gas.CountGas(raw.Method)
+		atomic.AddUint64(cuCount, gas.CountGas(raw.Method))
 		return data
 	}
 }
@@ -372,6 +384,6 @@ func exit(code int, format string, args ...interface{}) {
 type JsonRpcRequest struct {
 	Id      int           `json:"id"`
 	Jsonrpc string        `json:"jsonrpc"`
-	Params  []interface{} `json:"params"`
+	Params  json.RawMessage `json:"params"`
 	Method  string        `json:"method"`
 }
