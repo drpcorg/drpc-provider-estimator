@@ -29,7 +29,7 @@ Application Options:
 
 ## run.sh
 
-The repository includes a pre-configured script for running several standard workloads on a Dshackle instance. To use this, you need to compile the necessary tools and execute the following command:
+The repository includes a pre-configured script for running several standard workloads on a Dshackle instance. To use this, you need to compile the necessary tools, disable TLS on dshackle and execute the following command:
  ```bash
  ./run.sh <host>:<port>
  ```
